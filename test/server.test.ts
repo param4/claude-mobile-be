@@ -9,6 +9,7 @@ import { LiveManager } from '../src/live.js';
 import { fakeSdk } from './fakeSdk.js';
 import { NO_FOLDER, SessionStore, projectOf } from '../src/sessions.js';
 import { activeChain, cleanUserText, toChatItems } from '../src/transcripts.js';
+import { UploadStore } from '../src/uploads.js';
 import { NOW, makeFixture, transcriptA1 } from './fixtures.js';
 
 const TOKEN = 'x'.repeat(43);
@@ -18,7 +19,8 @@ function setup(liveState?: (id: string) => 'working' | 'needs-input' | undefined
   const store = new SessionStore({ ...fx, now: () => NOW, liveState });
   const sdk = fakeSdk();
   const live = new LiveManager(sdk.queryFn);
-  return { fx, store, sdk, live, app: createApp({ token: TOKEN, store, live }) };
+  const uploads = new UploadStore(path.join(fx.root, 'uploads'));
+  return { fx, store, sdk, live, app: createApp({ token: TOKEN, store, live, uploads, home: fx.root }) };
 }
 
 const auth = { Authorization: `Bearer ${TOKEN}` };

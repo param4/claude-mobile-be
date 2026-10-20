@@ -1,9 +1,19 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Effort, PermissionMode } from '@claude-mobile/protocol';
-import type { ChatItem, LiveSettings, Project, SessionGroup, SessionQuery, SessionSummary } from '@claude-mobile/protocol';
+import type { LiveSettings, Project, SessionGroup, SessionQuery, SessionSummary } from '@claude-mobile/protocol';
 import { readDesktopSessions, scratchRoot } from './desktop.js';
-import { activeChain, findTranscript, lastPrompt, readTranscript, toChatItems } from './transcripts.js';
+import {
+  activeChain,
+  findImage,
+  findTranscript,
+  lastPrompt,
+  parentOf,
+  readTranscript,
+  searchItems,
+  toChatItems,
+  toMarkdown,
+} from './transcripts.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -103,16 +113,56 @@ export class SessionStore {
     return groupSessions(filterSessions(await this.list(), q), q, this.now(), this.opts.liveState);
   }
 
-  async messages(id: string, limit: number, offset: number) {
+  private async transcript(id: string) {
     const session = await this.get(id);
     if (!session) return undefined;
     const file = await findTranscript(this.opts.transcriptsRoot, session.cwd, session.cliSessionId);
     const entries = file ? await readTranscript(file) : [];
-    const all: ChatItem[] = toChatItems(activeChain(entries), entries, session.cwd);
+    return { session, entries };
+  }
+
+  private async items(id: string) {
+    const t = await this.transcript(id);
+    if (!t) return undefined;
+    const imageUrl = (uuid: string, index: number) => `/api/sessions/${encodeURIComponent(id)}/images/${uuid}/${index}`;
+    return { session: t.session, items: toChatItems(activeChain(t.entries), t.entries, t.session.cwd, imageUrl) };
+  }
+
+  async messages(id: string, limit: number, offset: number) {
+    const found = await this.items(id);
+    if (!found) return undefined;
+    const { session, items: all } = found;
     // offset counts back from the newest item, so the app can page upwards.
     const end = Math.max(0, all.length - offset);
     const start = Math.max(0, end - limit);
     return { session, items: all.slice(start, end), hasMore: start > 0 };
+  }
+
+  async search(id: string, q: string) {
+    const found = await this.items(id);
+    return found && searchItems(found.items, q);
+  }
+
+  async markdown(id: string) {
+    const found = await this.items(id);
+    return found && { title: found.session.title, markdown: toMarkdown(found.session.title, found.items) };
+  }
+
+  async image(id: string, uuid: string, index: number) {
+    const t = await this.transcript(id);
+    return t && findImage(t.entries, uuid, index);
+  }
+
+  // Where a rewind to this message resumes: the entry before it. null for the first message.
+  async parentOf(id: string, uuid: string): Promise<string | null | undefined> {
+    const t = await this.transcript(id);
+    return t && parentOf(t.entries, uuid);
+  }
+
+  async chatCounts(): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    for (const s of await this.list()) if (!s.archived) counts.set(s.cwd, (counts.get(s.cwd) ?? 0) + 1);
+    return counts;
   }
 }
 

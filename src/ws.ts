@@ -4,6 +4,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { ClientMessage, type ServerMessage } from '@claude-mobile/protocol';
 import type { LiveManager } from './live.js';
 import type { SessionStore } from './sessions.js';
+import type { UploadStore } from './uploads.js';
 
 function tokenOf(req: IncomingMessage): string {
   const header = req.headers.authorization?.replace(/^Bearer /, '');
@@ -17,7 +18,10 @@ function sameToken(a: string, b: string) {
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
 
-export function attachWebSocket(server: Server, { token, store, live }: { token: string; store: SessionStore; live: LiveManager }) {
+export function attachWebSocket(
+  server: Server,
+  { token, store, live, uploads }: { token: string; store: SessionStore; live: LiveManager; uploads: UploadStore },
+) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
   server.on('upgrade', (req, socket, head) => {
@@ -94,14 +98,37 @@ export function attachWebSocket(server: Server, { token, store, live }: { token:
           subs.get(session.id)?.();
           subs.delete(session.id);
           return;
-        case 'send':
-          session.send(msg.text);
+        case 'send': {
+          if (!msg.text.trim() && !msg.attachments?.length) throw new Error('Empty message');
+          let rewind;
+          if (msg.rewindTo) {
+            const resumeAt = await store.parentOf(session.id, msg.rewindTo);
+            if (resumeAt === undefined) throw new Error('That message is no longer in this chat');
+            if (resumeAt === null) throw new Error("Can't rewind past the first message. Start a new chat instead.");
+            rewind = { messageId: msg.rewindTo, resumeAt, files: msg.rewindFiles };
+          }
+          await session.send(msg.text, await uploads.toContent(msg.text, msg.attachments), rewind);
           return;
+        }
+        case 'rewind_preview': {
+          const r = await session.previewRewind(msg.messageId);
+          send({
+            type: 'rewind_preview',
+            sessionId: session.id,
+            messageId: msg.messageId,
+            canRewind: r.canRewind,
+            error: r.error,
+            filesChanged: 'filesChanged' in r ? r.filesChanged : undefined,
+            insertions: 'insertions' in r ? r.insertions : undefined,
+            deletions: 'deletions' in r ? r.deletions : undefined,
+          });
+          return;
+        }
         case 'interrupt':
           await session.interrupt();
           return;
         case 'settings':
-          await session.updateSettings({ model: msg.model, effort: msg.effort, permissionMode: msg.permissionMode });
+          await session.updateSettings({ model: msg.model, effort: msg.effort, permissionMode: msg.permissionMode, fastMode: msg.fastMode });
           return;
         case 'permission':
           if (!session.answerPermission(msg.requestId, msg.decision, msg.message, msg.answers)) {

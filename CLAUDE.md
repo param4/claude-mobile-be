@@ -12,9 +12,13 @@ The Mac-side server of Claude Mobile. The phone app is the sibling repo `../clau
 - **Done:**
   - browse: projects, filtered sessions, paged history
   - live chat over `/api/ws`: streaming, interrupt, live model/effort/mode, slash commands, approvals, AskUserQuestion
-  - new chats from the phone, registered in the desktop sidebar
-  - 24 vitest tests
+  - new chats from the phone, registered in the desktop sidebar; in any folder inside home; desktop presets
+  - attachments (uploads → inline images / file paths), images of past messages, `@` file search
+  - fork (whole or from a message), search in a chat, Markdown export, Fast mode
+  - edit / retry / rewind: `send` with `rewindTo` restarts the query with `resumeSessionAt` = the parent of that message; `rewindFiles` calls `Query.rewindFiles` first (queries run with `enableFileCheckpointing`)
+  - 39 vitest tests
 - **Next:**
+  - rename / pin / archive from the phone: needs editing desktop records (owner agreed), blocked on a test of whether the desktop picks up and keeps external edits
   - voice proxy (phase 3)
   - launchd auto-start (phase 4)
   - confirm that phone-started chats appear in the desktop sidebar after a desktop app restart

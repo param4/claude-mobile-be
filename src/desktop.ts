@@ -95,6 +95,8 @@ export type NewDesktopSession = {
   model?: string;
   effort?: string;
   permissionMode: string;
+  // The desktop session this one was forked from.
+  forkedFrom?: string;
 };
 
 // The desktop app keeps folderless chats in scratch-workspaces/<account>/<org>/scratch-<date>-<hex>,
@@ -142,6 +144,7 @@ export async function registerDesktopSession(root: string, s: NewDesktopSession,
     alwaysAllowedReasons: [],
     sessionPermissionUpdates: [],
     spawnSeed: {},
+    ...(s.forkedFrom ? { forkedFromSessionId: s.forkedFrom } : {}),
   };
   for (const key of TEMPLATE_FIELDS) if (key in template) record[key] = template[key];
 

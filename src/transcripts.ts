@@ -1,7 +1,8 @@
 // Locates and parses Claude Code JSONL transcripts (~/.claude/projects/<encoded-cwd>/<id>.jsonl).
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { ChatItem } from '@claude-mobile/protocol';
+import type { ChatItem, ImageRef } from '@claude-mobile/protocol';
+import { ATTACHED_FILE_PREFIX } from './uploads.js';
 
 const TOOL_RESULT_LIMIT = 4000;
 
@@ -155,7 +156,20 @@ function collectToolResults(entries: Entry[]): Map<string, NonNullable<Extract<C
   return results;
 }
 
-export function toChatItems(chain: Entry[], all: Entry[] = chain, sessionCwd?: string): ChatItem[] {
+// Splits "Attached file: <path>" lines (added for phone attachments) out of a user message.
+export function splitAttachedFiles(text: string): { text: string; files: string[] } {
+  const files: string[] = [];
+  const kept = text.split('\n').filter((l) => {
+    if (!l.startsWith(ATTACHED_FILE_PREFIX)) return true;
+    files.push(path.basename(l.slice(ATTACHED_FILE_PREFIX.length).trim()));
+    return false;
+  });
+  return { text: kept.join('\n').trim(), files };
+}
+
+export type ImageUrl = (entryUuid: string, index: number) => string;
+
+export function toChatItems(chain: Entry[], all: Entry[] = chain, sessionCwd?: string, imageUrl?: ImageUrl): ChatItem[] {
   const items: ChatItem[] = [];
   const results = collectToolResults(all);
 
@@ -165,8 +179,20 @@ export function toChatItems(chain: Entry[], all: Entry[] = chain, sessionCwd?: s
       if (e.isMeta) continue;
       const blocks = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [];
       const texts = blocks.filter((b: any) => b?.type === 'text').map((b: any) => cleanUserText(String(b.text ?? '')));
-      const text = texts.filter(Boolean).join('\n\n');
-      if (text) items.push({ kind: 'user', id: e.uuid, text, timestamp: e.timestamp });
+      const { text, files } = splitAttachedFiles(texts.filter(Boolean).join('\n\n'));
+      const images: ImageRef[] = imageUrl
+        ? blocks.flatMap((b: any, i: number) => (b?.type === 'image' && b.source?.type === 'base64' ? [{ url: imageUrl(e.uuid, i) }] : []))
+        : [];
+      if (text || images.length || files.length) {
+        items.push({
+          kind: 'user',
+          id: e.uuid,
+          text,
+          timestamp: e.timestamp,
+          ...(images.length ? { images } : {}),
+          ...(files.length ? { files } : {}),
+        });
+      }
     } else if (e.type === 'system' && e.subtype === 'local_command' && typeof e.content === 'string') {
       // Output of commands like /context or /cost, shown to the user but never sent to the model.
       const text = commandOutput(e.content);
@@ -197,4 +223,47 @@ export function toChatItems(chain: Entry[], all: Entry[] = chain, sessionCwd?: s
 
 export async function readTranscript(file: string): Promise<Entry[]> {
   return parseLines(await fs.readFile(file, 'utf8'));
+}
+
+// An inline image of a user message, for the app to display.
+export function findImage(entries: Entry[], uuid: string, index: number): { mediaType: string; data: Buffer } | undefined {
+  const e = entries.find((x) => x.uuid === uuid);
+  const b = Array.isArray(e?.message?.content) ? e.message.content[index] : undefined;
+  if (b?.type !== 'image' || b.source?.type !== 'base64' || typeof b.source.data !== 'string') return undefined;
+  return { mediaType: String(b.source.media_type ?? 'image/png'), data: Buffer.from(b.source.data, 'base64') };
+}
+
+// The entry just before this one in the conversation, where a rewind to it resumes.
+export function parentOf(entries: Entry[], uuid: string): string | null | undefined {
+  const e = entries.find((x) => x.uuid === uuid);
+  return e ? (e.parentUuid ?? null) : undefined;
+}
+
+function searchable(item: ChatItem): string {
+  switch (item.kind) {
+    case 'user':
+    case 'assistant':
+    case 'thinking':
+      return item.text;
+    case 'tool':
+      return `${item.name} ${item.summary}`;
+  }
+}
+
+// Ids of matching items, newest first.
+export function searchItems(items: ChatItem[], q: string): string[] {
+  const needle = q.toLowerCase();
+  return items.filter((i) => i.kind !== 'thinking' && searchable(i).toLowerCase().includes(needle)).map((i) => i.id).reverse();
+}
+
+export function toMarkdown(title: string, items: ChatItem[]): string {
+  const out = [`# ${title}`];
+  for (const i of items) {
+    if (i.kind === 'user') {
+      const extras = [...(i.images ?? []).map(() => '[image]'), ...(i.files ?? []).map((f) => `[${f}]`)].join(' ');
+      out.push(`**You:** ${[i.text, extras].filter(Boolean).join(' ')}`);
+    } else if (i.kind === 'assistant') out.push(i.text);
+    else if (i.kind === 'tool') out.push(`\`${i.name}\` ${i.summary}`.trim());
+  }
+  return out.join('\n\n') + '\n';
 }

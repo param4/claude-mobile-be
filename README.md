@@ -89,12 +89,21 @@ Every request needs `Authorization: Bearer <token>`. The WebSocket also accepts 
 | `GET /api/sessions?project=&status=&groupBy=&sort=&q=` | Session groups. `status`: active, archived or all. `groupBy`: date, project, state or none. `sort`: recency, alpha or created |
 | `GET /api/sessions/:id/messages?limit=&offset=` | Chat history, paged from the newest end |
 | `GET /api/catalog?project=` | Slash commands, models and default settings for a new chat |
-| `POST /api/sessions` | `{ project, text, model?, effort?, permissionMode? }` starts a chat and returns `{ sessionId }` |
+| `POST /api/sessions` | `{ project, text, attachments?, model?, effort?, permissionMode?, fastMode? }` starts a chat and returns `{ sessionId }`. `project` may also be any folder inside your home folder |
+| `POST /api/uploads` | The raw file as the body, its name in `X-File-Name`. Returns `{ id, kind, name, mediaType, size }` |
+| `GET /api/uploads/:id` | An uploaded file |
+| `GET /api/sessions/:id/images/:entry/:index` | An image from a past message |
+| `GET /api/files?project=\|session=&q=` | File paths for `@` mentions, best matches first |
+| `GET /api/folders?path=` | Subfolders, for starting a chat in a new folder (home folder only) |
+| `GET /api/presets` | The desktop's saved session presets for folders on this Mac |
+| `POST /api/sessions/:id/fork` | `{ upToMessageId?, before? }` copies the chat (or part of it) into a new desktop chat |
+| `GET /api/sessions/:id/search?q=` | Ids of matching messages, newest first |
+| `GET /api/sessions/:id/export` | `{ title, markdown }` |
 
 **WebSocket `/api/ws`**
 
-- **App to server:** `subscribe`, `unsubscribe`, `send` (a message), `interrupt`, `settings` (model / effort / permissionMode), `permission` (allow, allowAlways or deny, plus answers for questions).
-- **Server to app:** `snapshot`, `catalog`, `state`, `settings`, `item`, `delta` (streamed text), `tool_result`, `permission`, `permission_resolved`, `turn_end`, `notice`, `error`.
+- **App to server:** `subscribe`, `unsubscribe`, `send` (a message with optional upload ids; with `rewindTo` it replaces that message and everything after it, and `rewindFiles` also restores files), `rewind_preview`, `interrupt`, `settings` (model / effort / permissionMode / fastMode), `permission` (allow, allowAlways or deny, plus answers for questions).
+- **Server to app:** `snapshot`, `catalog`, `state`, `settings`, `item`, `delta` (streamed text), `tool_result`, `permission`, `permission_resolved`, `turn_end`, `notice`, `rewind_preview`, `error`.
 
 ## Project structure
 
@@ -107,7 +116,10 @@ src/
   live.ts         LiveSession: drives one chat via the Agent SDK; Catalog: commands and models
   sessions.ts     listing, filtering, grouping and paging
   desktop.ts      reads and adds desktop session records; scratch folders for "No folder" chats
-  transcripts.ts  parses Claude Code JSONL transcripts into chat items
+  transcripts.ts  parses Claude Code JSONL transcripts into chat items; search and Markdown export
+  uploads.ts      attachments from the phone (~/.claude-mobile/uploads) and the user message built from them
+  files.ts        file search for @ mentions; folder browser
+  presets.ts      reads the desktop's session presets
   pair.ts         prints the pairing QR code
 protocol/         types and zod schemas shared with claude-mobile-app
 test/             vitest suites; a fake SDK stands in for Claude Code
@@ -129,7 +141,8 @@ pnpm typecheck   # server + protocol
 
 - The server only listens on the Tailscale address, so other devices on your Wi-Fi or the internet can't reach it, and every request needs the pairing token.
 - Requests are plain HTTP, but Tailscale encrypts all traffic between your devices (WireGuard).
-- New chats can only be started in folders that already have desktop sessions, or in a fresh "No folder" scratch folder.
+- New chats can only be started in folders inside your home folder (the folder browser can't leave it), or in a fresh "No folder" scratch folder.
+- Attachments are stored in `~/.claude-mobile/uploads`, readable only by you. Images go to Claude inline; other files are handed over by path.
 - Desktop records are only ever added; existing ones are never edited. Each new file is written to a temporary name and then linked into place, so it can't overwrite an existing record.
 
 ## Known limits

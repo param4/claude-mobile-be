@@ -5,6 +5,7 @@ export function fakeSdk() {
   const calls: { method: string; arg: unknown }[] = [];
   const sent: unknown[] = [];
   let options: any;
+  const allOptions: any[] = [];
   let push!: (m: any) => void;
   let end!: () => void;
   const queue: any[] = [];
@@ -20,6 +21,8 @@ export function fakeSdk() {
   };
   const queryFn = ((args: any) => {
     options = args.options;
+    allOptions.push(args.options);
+    done = false;
     (async () => {
       for await (const m of args.prompt) sent.push(m);
     })();
@@ -39,6 +42,10 @@ export function fakeSdk() {
     for (const method of ['setModel', 'setPermissionMode', 'applyFlagSettings', 'interrupt']) {
       g[method] = async (arg: unknown) => void calls.push({ method, arg });
     }
+    g.rewindFiles = async (id: string, opts?: { dryRun?: boolean }) => {
+      calls.push({ method: 'rewindFiles', arg: { id, ...opts } });
+      return { canRewind: true, filesChanged: ['src/a.ts'], insertions: 3, deletions: 1 };
+    };
     g.supportedCommands = async () => [{ name: 'compact', description: 'Compact', argumentHint: '' }];
     g.supportedModels = async () => [
       { value: 'default', displayName: 'Default', description: '' },
@@ -47,5 +54,5 @@ export function fakeSdk() {
     g.close = end;
     return g;
   }) as unknown as QueryFn;
-  return { queryFn, calls, sent, push, end, options: () => options };
+  return { queryFn, calls, sent, push, end, options: () => options, allOptions };
 }

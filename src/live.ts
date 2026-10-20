@@ -24,9 +24,17 @@ import {
 } from '@claude-mobile/protocol';
 import { z } from 'zod';
 import { commandOutput, toolSummary } from './transcripts.js';
+import type { UserContent } from './uploads.js';
 
 export type QueryFn = typeof sdkQuery;
 type Listener = (m: ServerMessage) => void;
+
+export type Rewind = {
+  // The user message being replaced, and the entry before it, where the conversation resumes.
+  messageId: string;
+  resumeAt: string;
+  files?: boolean;
+};
 
 const SETTING_SOURCES = ['user', 'project', 'local'] as const;
 const IDLE_SHUTDOWN_MS = 15 * 60 * 1000;
@@ -138,32 +146,47 @@ export class LiveSession {
     this.scheduleIdleShutdown();
   }
 
-  private start() {
-    if (this.q) return;
+  private start(resumeAt?: string): Query {
+    if (this.q) return this.q;
     this.input = new InputQueue();
-    this.q = this.queryFn({
+    const q = this.queryFn({
       prompt: this.input,
       options: {
         cwd: this.session.cwd,
         // A chat started from the phone gets the id its desktop record already points at.
         ...(this.resumable ? { resume: this.session.cliSessionId } : { sessionId: this.session.cliSessionId }),
+        ...(resumeAt ? { resumeSessionAt: resumeAt } : {}),
         model: this.settings.model,
         effort: this.settings.effort,
         permissionMode: this.settings.permissionMode,
+        ...(this.settings.fastMode !== undefined ? { settings: { fastMode: this.settings.fastMode } } : {}),
         settingSources: [...SETTING_SOURCES],
         includePartialMessages: true,
+        enableFileCheckpointing: true,
         canUseTool: this.canUseTool,
       },
     });
+    this.q = q;
     this.resumable = true;
-    this.pump(this.q);
+    this.pump(q);
+    return q;
+  }
+
+  // Ends the current query without the cleanup a crash or idle shutdown does; only used while idle.
+  private drop() {
+    const q = this.q;
+    this.q = undefined;
+    this.input?.close();
+    this.input = undefined;
+    q?.close();
   }
 
   private async pump(q: Query) {
     try {
       for await (const m of q) this.handle(m);
     } catch (e) {
-      this.emit({ type: 'error', sessionId: this.id, message: e instanceof Error ? e.message : String(e) });
+      // A query dropped for a rewind may throw as it closes; that's not the phone's business.
+      if (this.q === q) this.emit({ type: 'error', sessionId: this.id, message: e instanceof Error ? e.message : String(e) });
     } finally {
       if (this.q === q) {
         this.q = undefined;
@@ -285,13 +308,39 @@ export class LiveSession {
     return true;
   }
 
-  send(text: string) {
-    this.start();
+  async send(text: string, user: UserContent = { content: text, images: [], files: [] }, rewind?: Rewind) {
+    if (rewind) {
+      if (this.state !== 'idle') throw new Error('Stop Claude before editing or rewinding');
+      if (!this.resumable) throw new Error('Nothing to rewind yet');
+      if (rewind.files) {
+        const result = await this.start().rewindFiles(rewind.messageId);
+        if (!result.canRewind) throw new Error(result.error ?? "Files can't be rewound to that message");
+      }
+      // Resuming at the entry before the replaced message branches the transcript there.
+      this.drop();
+      this.start(rewind.resumeAt);
+    } else this.start();
     // The same uuid ends up in the transcript, so the app can match live and stored copies.
     const uuid = crypto.randomUUID();
-    this.input!.push({ type: 'user', uuid, message: { role: 'user', content: text }, parent_tool_use_id: null });
-    this.emit({ type: 'item', sessionId: this.id, item: { kind: 'user', id: uuid, text } });
+    this.input!.push({ type: 'user', uuid, message: { role: 'user', content: user.content as any }, parent_tool_use_id: null });
+    this.emit({
+      type: 'item',
+      sessionId: this.id,
+      item: {
+        kind: 'user',
+        id: uuid,
+        text: text.trim(),
+        ...(user.images.length ? { images: user.images } : {}),
+        ...(user.files.length ? { files: user.files } : {}),
+      },
+    });
     this.setState('working');
+  }
+
+  // What a code rewind to this message would change, without changing anything.
+  async previewRewind(messageId: string) {
+    if (!this.resumable) return { canRewind: false, error: 'Nothing to rewind yet' };
+    return this.start().rewindFiles(messageId, { dryRun: true });
   }
 
   async interrupt() {
@@ -303,6 +352,7 @@ export class LiveSession {
       if (change.model !== undefined) await this.q.setModel(change.model);
       if (change.permissionMode !== undefined) await this.q.setPermissionMode(change.permissionMode);
       if (change.effort !== undefined) await this.q.applyFlagSettings({ effortLevel: change.effort });
+      if (change.fastMode !== undefined) await this.q.applyFlagSettings({ fastMode: change.fastMode });
     }
     this.settings = { ...this.settings, ...Object.fromEntries(Object.entries(change).filter(([, v]) => v !== undefined)) };
     this.emit({ type: 'settings', sessionId: this.id, settings: this.settings });
